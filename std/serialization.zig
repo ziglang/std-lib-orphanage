@@ -3,7 +3,7 @@
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
-const std = @import("../std.zig");
+const std = @import("std");
 const builtin = std.builtin;
 const io = std.io;
 const assert = std.debug.assert;
@@ -152,7 +152,7 @@ pub fn Deserializer(comptime endian: builtin.Endian, comptime packing: Packing, 
                         //we avoid duplicate iteration over the enum tags
                         // by getting the int directly and casting it without
                         // safety. If it is bad, it will be caught anyway.
-                        const TagInt = @TagType(TagType);
+                        const TagInt = std.meta.TagType(TagType);
                         const tag = try self.deserializeInt(TagInt);
 
                         inline for (info.fields) |field_info| {
@@ -183,7 +183,7 @@ pub fn Deserializer(comptime endian: builtin.Endian, comptime packing: Packing, 
                     try self.deserializeInto(val_ptr);
                 },
                 .Enum => {
-                    var value = try self.deserializeInt(@TagType(C));
+                    var value = try self.deserializeInt(std.meta.TagType(C));
                     ptr.* = try meta.intToEnum(C, value);
                 },
                 else => {
@@ -217,25 +217,25 @@ pub fn deserializer(
 /// which will be called when the serializer is used to serialize that type. It will
 /// pass a const pointer to the type instance to be serialized and a pointer
 /// to the serializer struct.
-pub fn Serializer(comptime endian: builtin.Endian, comptime packing: Packing, comptime OutStreamType: type) type {
+pub fn Serializer(comptime endian: builtin.Endian, comptime packing: Packing, comptime Writer: type) type {
     return struct {
-        out_stream: if (packing == .Bit) io.BitOutStream(endian, OutStreamType) else OutStreamType,
+        writer: if (packing == .Bit) io.BitWriter(endian, Writer) else Writer,
 
         const Self = @This();
-        pub const Error = OutStreamType.Error;
+        pub const Error = Writer.Error;
 
-        pub fn init(out_stream: OutStreamType) Self {
+        pub fn init(writer: Writer) Self {
             return Self{
-                .out_stream = switch (packing) {
-                    .Bit => io.bitOutStream(endian, out_stream),
-                    .Byte => out_stream,
+                .writer = switch (packing) {
+                    .Bit => io.bitWriter(endian, writer),
+                    .Byte => writer,
                 },
             };
         }
 
         /// Flushes any unwritten bits to the stream
         pub fn flush(self: *Self) Error!void {
-            if (packing == .Bit) return self.out_stream.flushBits();
+            if (packing == .Bit) return self.writer.flushBits();
         }
 
         fn serializeInt(self: *Self, value: anytype) Error!void {
@@ -251,7 +251,7 @@ pub fn Serializer(comptime endian: builtin.Endian, comptime packing: Packing, co
 
             const u_value = @bitCast(U, value);
 
-            if (packing == .Bit) return self.out_stream.writeBits(u_value, t_bit_count);
+            if (packing == .Bit) return self.writer.writeBits(u_value, t_bit_count);
 
             var buffer: [int_size]u8 = undefined;
             if (int_size == 1) buffer[0] = u_value;
@@ -266,7 +266,7 @@ pub fn Serializer(comptime endian: builtin.Endian, comptime packing: Packing, co
                 byte.* = if (t_bit_count < u8_bit_count) v else @truncate(u8, v);
             }
 
-            try self.out_stream.writeAll(&buffer);
+            try self.writer.writeAll(&buffer);
         }
 
         /// Serializes the passed value into the stream
@@ -283,7 +283,7 @@ pub fn Serializer(comptime endian: builtin.Endian, comptime packing: Packing, co
             if (comptime trait.hasFn("serialize")(T)) return T.serialize(value, self);
 
             if (comptime trait.isPacked(T) and packing != .Bit) {
-                var packed_serializer = Serializer(endian, .Bit, OutStreamType).init(self.out_stream);
+                var packed_serializer = Serializer(endian, .Bit, Writer).init(self.writer);
                 try packed_serializer.serialize(value);
                 try packed_serializer.flush();
                 return;
@@ -355,12 +355,12 @@ pub fn Serializer(comptime endian: builtin.Endian, comptime packing: Packing, co
 pub fn serializer(
     comptime endian: builtin.Endian,
     comptime packing: Packing,
-    out_stream: anytype,
-) Serializer(endian, packing, @TypeOf(out_stream)) {
-    return Serializer(endian, packing, @TypeOf(out_stream)).init(out_stream);
+    writer: anytype,
+) Serializer(endian, packing, @TypeOf(writer)) {
+    return Serializer(endian, packing, @TypeOf(writer)).init(writer);
 }
 
-fn testIntSerializerDeserializer(comptime endian: builtin.Endian, comptime packing: io.Packing) !void {
+fn testIntSerializerDeserializer(comptime endian: builtin.Endian, comptime packing: Packing) !void {
     @setEvalBranchQuota(1500);
     //@NOTE: if this test is taking too long, reduce the maximum tested bitsize
     const max_test_bitsize = 128;
@@ -374,7 +374,7 @@ fn testIntSerializerDeserializer(comptime endian: builtin.Endian, comptime packi
 
     var data_mem: [total_bytes]u8 = undefined;
     var out = io.fixedBufferStream(&data_mem);
-    var _serializer = serializer(endian, packing, out.outStream());
+    var _serializer = serializer(endian, packing, out.writer());
 
     var in = io.fixedBufferStream(&data_mem);
     var _deserializer = deserializer(endian, packing, in.reader());
@@ -409,7 +409,7 @@ fn testIntSerializerDeserializer(comptime endian: builtin.Endian, comptime packi
 
     //Verify that empty error set works with serializer.
     //deserializer is covered by FixedBufferStream
-    var null_serializer = io.serializer(endian, packing, std.io.null_out_stream);
+    var null_serializer = serializer(endian, packing, std.io.null_writer);
     try null_serializer.serialize(data_mem[0..]);
     try null_serializer.flush();
 }
@@ -425,13 +425,13 @@ test "Serializer/Deserializer Int" {
 
 fn testIntSerializerDeserializerInfNaN(
     comptime endian: builtin.Endian,
-    comptime packing: io.Packing,
+    comptime packing: Packing,
 ) !void {
     const mem_size = (16 * 2 + 32 * 2 + 64 * 2 + 128 * 2) / comptime meta.bitCount(u8);
     var data_mem: [mem_size]u8 = undefined;
 
     var out = io.fixedBufferStream(&data_mem);
-    var _serializer = serializer(endian, packing, out.outStream());
+    var _serializer = serializer(endian, packing, out.writer());
 
     var in = io.fixedBufferStream(&data_mem);
     var _deserializer = deserializer(endian, packing, in.reader());
@@ -475,7 +475,7 @@ fn testAlternateSerializer(self: anytype, _serializer: anytype) !void {
     try _serializer.serialize(self.f_f16);
 }
 
-fn testSerializerDeserializer(comptime endian: builtin.Endian, comptime packing: io.Packing) !void {
+fn testSerializerDeserializer(comptime endian: builtin.Endian, comptime packing: Packing) !void {
     const ColorType = enum(u4) {
         RGB8 = 1,
         RA16 = 2,
@@ -560,7 +560,7 @@ fn testSerializerDeserializer(comptime endian: builtin.Endian, comptime packing:
 
     var data_mem: [@sizeOf(MyStruct)]u8 = undefined;
     var out = io.fixedBufferStream(&data_mem);
-    var _serializer = serializer(endian, packing, out.outStream());
+    var _serializer = serializer(endian, packing, out.writer());
 
     var in = io.fixedBufferStream(&data_mem);
     var _deserializer = deserializer(endian, packing, in.reader());
@@ -578,7 +578,7 @@ test "Serializer/Deserializer generic" {
     try testSerializerDeserializer(builtin.Endian.Little, .Bit);
 }
 
-fn testBadData(comptime endian: builtin.Endian, comptime packing: io.Packing) !void {
+fn testBadData(comptime endian: builtin.Endian, comptime packing: Packing) !void {
     const E = enum(u14) {
         One = 1,
         Two = 2,
@@ -595,7 +595,7 @@ fn testBadData(comptime endian: builtin.Endian, comptime packing: io.Packing) !v
 
     var data_mem: [4]u8 = undefined;
     var out = io.fixedBufferStream(&data_mem);
-    var _serializer = serializer(endian, packing, out.outStream());
+    var _serializer = serializer(endian, packing, out.writer());
 
     var in = io.fixedBufferStream(&data_mem);
     var _deserializer = deserializer(endian, packing, in.reader());
