@@ -3,8 +3,7 @@
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
-const builtin = @import("builtin");
-const std = @import("std.zig");
+const std = @import("std");
 const math = std.math;
 const debug = std.debug;
 const assert = std.debug.assert;
@@ -26,7 +25,7 @@ pub fn BloomFilter(
     ///  - an unsigned integer type for a counting bloom filter
     comptime Cell: type,
     /// endianess of the Cell
-    comptime endian: builtin.Endian,
+    comptime endian: std.builtin.Endian,
     /// Hash function to use
     comptime hash: fn (out: []u8, Ki: usize, in: []const u8) void,
 ) type {
@@ -165,12 +164,9 @@ fn hashFunc(out: []u8, Ki: usize, in: []const u8) void {
 }
 
 test "std.BloomFilter" {
-    // https://github.com/ziglang/zig/issues/5127
-    if (std.Target.current.cpu.arch == .mips) return error.SkipZigTest;
-
     inline for ([_]type{ bool, u1, u2, u3, u4 }) |Cell| {
         const emptyCell = if (Cell == bool) false else @as(Cell, 0);
-        const BF = BloomFilter(128 * 8, 8, Cell, builtin.endian, hashFunc);
+        const BF = BloomFilter(128 * 8, 8, Cell, std.builtin.endian, hashFunc);
         var bf = BF{};
         var i: usize = undefined;
         // confirm that it is initialised to the empty filter

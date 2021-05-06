@@ -16,7 +16,7 @@
 // Headers are implemented as an array of entries.
 // An index of field name => array indices is kept.
 
-const std = @import("../std.zig");
+const std = @import("std");
 const debug = std.debug;
 const assert = debug.assert;
 const testing = std.testing;
@@ -234,7 +234,7 @@ pub const Headers = struct {
             _ = self.index.remove(key); // invalidates `kv` and `dex`
             self.allocator.free(key);
         } else {
-            dex.shrink(self.allocator, dex.items.len - 1);
+            dex.shrinkAndFree(self.allocator, dex.items.len - 1);
             removed.deinit(self.allocator);
         }
         // if it was the last item; no need to rebuild index
@@ -259,7 +259,7 @@ pub const Headers = struct {
             _ = self.index.remove(key); // invalidates `kv` and `dex`
             self.allocator.free(key);
         } else {
-            dex.shrink(self.allocator, dex.items.len - 1);
+            dex.shrinkAndFree(self.allocator, dex.items.len - 1);
             removed.deinit(self.allocator);
         }
         // if it was the last item; no need to rebuild index
