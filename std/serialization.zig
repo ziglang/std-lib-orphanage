@@ -12,6 +12,16 @@ const meta = std.meta;
 const trait = meta.trait;
 const testing = std.testing;
 
+const Format = enum(u8) {
+    u16 = 0xfd,
+    u32 = 0xfe,
+    u64 = 0xff,
+
+    pub fn value(v: Format) u8 {
+        return @enumToInt(v);
+    }
+};
+
 pub const Packing = enum {
     /// Pack data to byte alignment
     Byte,
@@ -34,21 +44,43 @@ pub const Packing = enum {
 pub fn Deserializer(comptime endian: builtin.Endian, comptime packing: Packing, comptime ReaderType: type) type {
     return struct {
         in_stream: if (packing == .Bit) io.BitReader(endian, ReaderType) else ReaderType,
+        allocator: *std.mem.Allocator,
 
         const Self = @This();
 
-        pub fn init(in_stream: ReaderType) Self {
+        pub fn init(allocator: *std.mem.Allocator, in_stream: ReaderType) Self {
             return Self{
                 .in_stream = switch (packing) {
                     .Bit => io.bitReader(endian, in_stream),
                     .Byte => in_stream,
                 },
+                .allocator = allocator,
             };
         }
 
         pub fn alignToByte(self: *Self) void {
             if (packing == .Byte) return;
             self.in_stream.alignToByte();
+        }
+
+        fn deserializeUsize(self: *Self) !usize {
+            const byte: u8 = try self.in_stream.readByte();
+            const usize_size = std.meta.bitCount(usize);
+            switch (byte) {
+                Format.value(.u16) => {
+                    if (usize_size < std.meta.bitCount(u16)) return error.TargetUsizeToSmall;
+                    return @intCast(usize, try self.deserializeInt(u16));
+                },
+                Format.value(.u32) => {
+                    if (usize_size < std.meta.bitCount(u32)) return error.TargetUsizeToSmall;
+                    return @intCast(usize, try self.deserializeInt(u32));
+                },
+                Format.value(.u64) => {
+                    if (usize_size < std.meta.bitCount(u64)) return error.TargetUsizeToSmall;
+                    return @intCast(usize, try self.deserializeInt(u64));
+                },
+                else => return @intCast(usize, byte),
+            }
         }
 
         //@BUG: inferred error issue. See: #1386
@@ -104,14 +136,6 @@ pub fn Deserializer(comptime endian: builtin.Endian, comptime packing: Packing, 
             const T = @TypeOf(ptr);
             comptime assert(trait.is(.Pointer)(T));
 
-            if (comptime trait.isSlice(T) or comptime trait.isPtrTo(.Array)(T)) {
-                for (ptr) |*v|
-                    try self.deserializeInto(v);
-                return;
-            }
-
-            comptime assert(trait.isSingleItemPtr(T));
-
             const C = comptime meta.Child(T);
             const child_type_id = @typeInfo(C);
 
@@ -137,10 +161,13 @@ pub fn Deserializer(comptime endian: builtin.Endian, comptime packing: Packing, 
                         if (FieldType == void or FieldType == u0) continue;
 
                         //it doesn't make any sense to read pointers
-                        if (comptime trait.is(.Pointer)(FieldType)) {
+                        if (comptime trait.is(.Pointer)(FieldType) and @typeInfo(FieldType).Pointer.size != .Slice) {
                             @compileError("Will not " ++ "read field " ++ name ++ " of struct " ++
                                 @typeName(C) ++ " because it " ++ "is of pointer-type " ++
                                 @typeName(FieldType) ++ ".");
+                        }
+                        if (comptime trait.is(.Pointer)(FieldType) and @typeInfo(FieldType).Pointer.size == .Slice) {
+                            self.alignToByte();
                         }
 
                         try self.deserializeInto(&@field(ptr, name));
@@ -183,8 +210,27 @@ pub fn Deserializer(comptime endian: builtin.Endian, comptime packing: Packing, 
                     try self.deserializeInto(val_ptr);
                 },
                 .Enum => {
-                    var value = try self.deserializeInt(std.meta.TagType(C));
+                    const value = if (@bitSizeOf(std.meta.TagType(C)) == 0) 0 else try self.deserializeInt(std.meta.TagType(C));
                     ptr.* = try meta.intToEnum(C, value);
+                },
+                .Pointer => |info| {
+                    switch (info.size) {
+                        .One, .Many, .C => @compileError("Attempting to deserialize non-slice pointer of type " ++ @tagName(info.size)),
+                        .Slice => {
+                            var len = try self.deserializeUsize();
+
+                            var slice = try self.allocator.alloc(info.child, len);
+                            for (slice) |*s| {
+                                try self.deserializeInto(s);
+                            }
+                            ptr.* = slice;
+                        },
+                    }
+                },
+                .Array => {
+                    for (ptr) |*s| {
+                        try self.deserializeInto(s);
+                    }
                 },
                 else => {
                     @compileError("Cannot deserialize " ++ @tagName(child_type_id) ++ " types (unimplemented).");
@@ -197,9 +243,10 @@ pub fn Deserializer(comptime endian: builtin.Endian, comptime packing: Packing, 
 pub fn deserializer(
     comptime endian: builtin.Endian,
     comptime packing: Packing,
+    allocator: *std.mem.Allocator,
     in_stream: anytype,
 ) Deserializer(endian, packing, @TypeOf(in_stream)) {
-    return Deserializer(endian, packing, @TypeOf(in_stream)).init(in_stream);
+    return Deserializer(endian, packing, @TypeOf(in_stream)).init(allocator, in_stream);
 }
 
 /// Creates a serializer that serializes types to any stream.
@@ -222,7 +269,9 @@ pub fn Serializer(comptime endian: builtin.Endian, comptime packing: Packing, co
         writer: if (packing == .Bit) io.BitWriter(endian, Writer) else Writer,
 
         const Self = @This();
-        pub const Error = Writer.Error;
+        pub const Error = Writer.Error || error{
+            SliceTooLarge,
+        };
 
         pub fn init(writer: Writer) Self {
             return Self{
@@ -236,6 +285,23 @@ pub fn Serializer(comptime endian: builtin.Endian, comptime packing: Packing, co
         /// Flushes any unwritten bits to the stream
         pub fn flush(self: *Self) Error!void {
             if (packing == .Bit) return self.writer.flushBits();
+        }
+
+        pub fn serializeUsize(self: *Self, value: usize) Error!void {
+            if (value < 0xfd) {
+                try self.writer.writeByte(@intCast(u8, value));
+            } else if (value <= 0xffff) {
+                try self.writer.writeByte(Format.value(.u16));
+                try self.serializeInt(@intCast(u16, value));
+            } else if (value <= 0xffff_ffff) {
+                try self.writer.writeByte(Format.value(.u32));
+                try self.serializeInt(@intCast(u32, value));
+            } else if (value <= 0xffff_ffff_ffff_ffff) {
+                try self.writer.writeByte(Format.value(.u64));
+                try self.serializeInt(@intCast(u64, value));
+            } else {
+                return error.SliceTooLarge;
+            }
         }
 
         fn serializeInt(self: *Self, value: anytype) Error!void {
@@ -273,12 +339,6 @@ pub fn Serializer(comptime endian: builtin.Endian, comptime packing: Packing, co
         pub fn serialize(self: *Self, value: anytype) Error!void {
             const T = comptime @TypeOf(value);
 
-            if (comptime trait.isIndexable(T)) {
-                for (value) |v|
-                    try self.serialize(v);
-                return;
-            }
-
             //custom serializer: fn(self: Self, serializer: anytype) !void
             if (comptime trait.hasFn("serialize")(T)) return T.serialize(value, self);
 
@@ -303,10 +363,13 @@ pub fn Serializer(comptime endian: builtin.Endian, comptime packing: Packing, co
                         if (FieldType == void or FieldType == u0) continue;
 
                         //It doesn't make sense to write pointers
-                        if (comptime trait.is(.Pointer)(FieldType)) {
+                        if (comptime trait.is(.Pointer)(FieldType) and @typeInfo(FieldType).Pointer.size != .Slice) {
                             @compileError("Will not " ++ "serialize field " ++ name ++
                                 " of struct " ++ @typeName(T) ++ " because it " ++
                                 "is of pointer-type " ++ @typeName(FieldType) ++ ".");
+                        }
+                        if (comptime trait.is(.Pointer)(FieldType) and @typeInfo(FieldType).Pointer.size == .Slice) {
+                            try self.flush();
                         }
                         try self.serialize(@field(value, name));
                     }
@@ -345,6 +408,22 @@ pub fn Serializer(comptime endian: builtin.Endian, comptime packing: Packing, co
                 },
                 .Enum => {
                     try self.serializeInt(@enumToInt(value));
+                },
+                .Pointer => |info| {
+                    switch (info.size) {
+                        .Many, .C => @compileError("Attempting to serialize non-slice pointer " ++ @tagName(info.size)),
+                        .One, .Slice => {
+                            try self.serializeUsize(value.len);
+                            for (value) |v| {
+                                try self.serialize(v);
+                            }
+                        },
+                    }
+                },
+                .Array => |info| {
+                    for (value) |v| {
+                        try self.serialize(v);
+                    }
                 },
                 else => @compileError("Cannot serialize " ++ @tagName(@typeInfo(T)) ++ " types (unimplemented)."),
             }
