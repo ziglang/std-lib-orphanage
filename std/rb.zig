@@ -52,8 +52,7 @@ pub const Node = struct {
                 if (node != p.right)
                     return p;
                 node = p;
-            } else
-                return null;
+            } else return null;
         }
     }
 
@@ -73,8 +72,7 @@ pub const Node = struct {
                 if (node != p.left)
                     return p;
                 node = p;
-            } else
-                return null;
+            } else return null;
         }
     }
 
@@ -278,8 +276,7 @@ pub const Tree = struct {
         if (node.left == null and node.right == null) {
             if (maybe_parent) |parent| {
                 parent.setChild(null, parent.left == node);
-            } else
-                tree.root = null;
+            } else tree.root = null;
             color = node.getColor();
             newnode = null;
         } else {
@@ -287,13 +284,11 @@ pub const Tree = struct {
                 next = node.right.?; // Not both null as per above
             } else if (node.right == null) {
                 next = node.left.?; // Not both null as per above
-            } else
-                next = node.right.?.getFirst(); // Just checked for null above
+            } else next = node.right.?.getFirst(); // Just checked for null above
 
             if (maybe_parent) |parent| {
                 parent.setChild(next, parent.left == node);
-            } else
-                tree.root = next;
+            } else tree.root = next;
 
             if (node.left != null and node.right != null) {
                 const left = node.left.?;
@@ -415,8 +410,7 @@ pub const Tree = struct {
 
         if (old.getParent()) |parent| {
             parent.setChild(new, parent.left == old);
-        } else
-            tree.root = new;
+        } else tree.root = new;
 
         if (old.left) |left|
             left.setParent(new);
@@ -522,7 +516,7 @@ fn testGetNumber(node: *Node) *testNumber {
     return @fieldParentPtr(testNumber, "node", node);
 }
 
-fn testCompare(l: *Node, r: *Node, contextIgnored: *Tree) Order {
+fn testCompare(l: *Node, r: *Node, _: *Tree) Order {
     var left = testGetNumber(l);
     var right = testGetNumber(r);
 
@@ -541,7 +535,7 @@ fn testCompareReverse(l: *Node, r: *Node, contextIgnored: *Tree) Order {
 }
 
 test "rb" {
-    if (@import("builtin").arch == .aarch64) {
+    if (@import("builtin").cpu.arch == .aarch64) {
         // TODO https://github.com/ziglang/zig/issues/3288
         return error.SkipZigTest;
     }
@@ -572,13 +566,13 @@ test "rb" {
     _ = tree.insert(&ns[8].node);
     _ = tree.insert(&ns[9].node);
     tree.remove(&ns[3].node);
-    testing.expect(tree.insert(&dup.node) == &ns[7].node);
+    try testing.expect(tree.insert(&dup.node) == &ns[7].node);
     try tree.replace(&ns[7].node, &dup.node);
 
     var num: *testNumber = undefined;
     num = testGetNumber(tree.first().?);
     while (num.node.next() != null) {
-        testing.expect(testGetNumber(num.node.next().?).value > num.value);
+        try testing.expect(testGetNumber(num.node.next().?).value > num.value);
         num = testGetNumber(num.node.next().?);
     }
 }
@@ -604,7 +598,7 @@ test "inserting and looking up" {
 }
 
 test "multiple inserts, followed by calling first and last" {
-    if (@import("builtin").arch == .aarch64) {
+    if (@import("builtin").cpu.arch == .aarch64) {
         // TODO https://github.com/ziglang/zig/issues/3288
         return error.SkipZigTest;
     }
