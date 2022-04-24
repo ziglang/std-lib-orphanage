@@ -52,8 +52,7 @@ pub const Node = struct {
                 if (node != p.right)
                     return p;
                 node = p;
-            } else
-                return null;
+            } else return null;
         }
     }
 
@@ -73,8 +72,7 @@ pub const Node = struct {
                 if (node != p.left)
                     return p;
                 node = p;
-            } else
-                return null;
+            } else return null;
         }
     }
 
@@ -278,8 +276,7 @@ pub const Tree = struct {
         if (node.left == null and node.right == null) {
             if (maybe_parent) |parent| {
                 parent.setChild(null, parent.left == node);
-            } else
-                tree.root = null;
+            } else tree.root = null;
             color = node.getColor();
             newnode = null;
         } else {
@@ -287,13 +284,11 @@ pub const Tree = struct {
                 next = node.right.?; // Not both null as per above
             } else if (node.right == null) {
                 next = node.left.?; // Not both null as per above
-            } else
-                next = node.right.?.getFirst(); // Just checked for null above
+            } else next = node.right.?.getFirst(); // Just checked for null above
 
             if (maybe_parent) |parent| {
                 parent.setChild(next, parent.left == node);
-            } else
-                tree.root = next;
+            } else tree.root = next;
 
             if (node.left != null and node.right != null) {
                 const left = node.left.?;
@@ -415,8 +410,7 @@ pub const Tree = struct {
 
         if (old.getParent()) |parent| {
             parent.setChild(new, parent.left == old);
-        } else
-            tree.root = new;
+        } else tree.root = new;
 
         if (old.left) |left|
             left.setParent(new);
@@ -522,7 +516,7 @@ fn testGetNumber(node: *Node) *testNumber {
     return @fieldParentPtr(testNumber, "node", node);
 }
 
-fn testCompare(l: *Node, r: *Node, contextIgnored: *Tree) Order {
+fn testCompare(l: *Node, r: *Node, _: *Tree) Order {
     var left = testGetNumber(l);
     var right = testGetNumber(r);
 
@@ -541,7 +535,7 @@ fn testCompareReverse(l: *Node, r: *Node, contextIgnored: *Tree) Order {
 }
 
 test "rb" {
-    if (@import("builtin").arch == .aarch64) {
+    if (@import("builtin").cpu.arch == .aarch64) {
         // TODO https://github.com/ziglang/zig/issues/3288
         return error.SkipZigTest;
     }
@@ -572,13 +566,13 @@ test "rb" {
     _ = tree.insert(&ns[8].node);
     _ = tree.insert(&ns[9].node);
     tree.remove(&ns[3].node);
-    testing.expect(tree.insert(&dup.node) == &ns[7].node);
+    try testing.expect(tree.insert(&dup.node) == &ns[7].node);
     try tree.replace(&ns[7].node, &dup.node);
 
     var num: *testNumber = undefined;
     num = testGetNumber(tree.first().?);
     while (num.node.next() != null) {
-        testing.expect(testGetNumber(num.node.next().?).value > num.value);
+        try testing.expect(testGetNumber(num.node.next().?).value > num.value);
         num = testGetNumber(num.node.next().?);
     }
 }
@@ -604,7 +598,7 @@ test "inserting and looking up" {
 }
 
 test "multiple inserts, followed by calling first and last" {
-    if (@import("builtin").arch == .aarch64) {
+    if (@import("builtin").cpu.arch == .aarch64) {
         // TODO https://github.com/ziglang/zig/issues/3288
         return error.SkipZigTest;
     }
@@ -630,4 +624,117 @@ test "multiple inserts, followed by calling first and last" {
     assert(testGetNumber(tree.first().?).value == 3);
     assert(testGetNumber(tree.last().?).value == 0);
     assert(tree.lookup(&lookupNode.node) == &third.node);
+}
+
+const Segment = struct {
+    node: Node = undefined,
+    /// Inclusive.
+    start: usize,
+    /// Exclusive.
+    end: usize,
+};
+
+fn segmentsCompare(l: *Node, r: *Node, _: *Tree) std.math.Order {
+    const left = @fieldParentPtr(Segment, "node", l);
+    const right = @fieldParentPtr(Segment, "node", r);
+    assert(left.start < left.end);
+    assert(right.start < right.end);
+
+    // Intersecting segments are considered "equal". Current implementation of a red-black tree
+    // does not allow duplicates, this insures that our tree will never have any intersecting
+    // segments.
+    if (left.end <= right.start) {
+        return .lt;
+    } else if (left.start >= right.end) {
+        return .gt;
+    } else {
+        return .eq;
+    }
+    unreachable;
+}
+
+test "incorrect looping behavior" {
+    var tree = Tree.init(segmentsCompare);
+    var segs: [6]Segment = undefined;
+
+    segs[0].start = 12;
+    segs[0].end = 13;
+    segs[1].start = 15;
+    segs[1].end = 16;
+    segs[2].start = 47;
+    segs[2].end = 48;
+    segs[3].start = 50;
+    segs[3].end = 51;
+    segs[4].start = 60;
+    segs[4].end = 61;
+    segs[5].start = 11;
+    segs[5].end = 16;
+
+    assert(tree.insert(&segs[0].node) == null);
+    assert(tree.insert(&segs[1].node) == null);
+    assert(tree.insert(&segs[2].node) == null);
+    assert(tree.insert(&segs[3].node) == null);
+    assert(tree.insert(&segs[4].node) == null);
+
+    // Order of removals breaks test, see next test.
+    tree.remove(&segs[1].node);
+    tree.remove(&segs[0].node);
+
+    assert(tree.insert(&segs[5].node) == null);
+
+    var node = tree.first();
+    try testing.expectEqual(node, &segs[5].node);
+    node = node.?.next();
+    try testing.expectEqual(node, &segs[2].node);
+
+    // Oops, 0 was removed and it loops.
+    node = node.?.next();
+    try testing.expectEqual(node, &segs[0].node);
+    node = node.?.next();
+    try testing.expectEqual(node, &segs[2].node);
+    node = node.?.next();
+    try testing.expectEqual(node, &segs[0].node);
+}
+
+test "correct behavior" {
+    var tree = Tree.init(segmentsCompare);
+    var segs: [6]Segment = undefined;
+
+    segs[0].start = 12;
+    segs[0].end = 13;
+    segs[1].start = 15;
+    segs[1].end = 16;
+    segs[2].start = 47;
+    segs[2].end = 48;
+    segs[3].start = 50;
+    segs[3].end = 51;
+    segs[4].start = 60;
+    segs[4].end = 61;
+    segs[5].start = 11;
+    segs[5].end = 16;
+
+    assert(tree.insert(&segs[0].node) == null);
+    assert(tree.insert(&segs[1].node) == null);
+    assert(tree.insert(&segs[2].node) == null);
+    assert(tree.insert(&segs[3].node) == null);
+    assert(tree.insert(&segs[4].node) == null);
+
+    // Order of removals breaks test, see previous test.
+    tree.remove(&segs[0].node);
+    tree.remove(&segs[1].node);
+
+    assert(tree.insert(&segs[5].node) == null);
+
+    var node = tree.first();
+    try testing.expectEqual(node, &segs[5].node);
+    node = node.?.next();
+    try testing.expectEqual(node, &segs[2].node);
+
+    // This is correct.
+    node = node.?.next();
+    try testing.expectEqual(node, &segs[3].node);
+    node = node.?.next();
+    try testing.expectEqual(node, &segs[4].node);
+    node = node.?.next();
+    try testing.expectEqual(node, null);
 }
